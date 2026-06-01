@@ -27,6 +27,10 @@ enum MoveId : uint8_t {
     MOVE_RECOVER,
     MOVE_LOVELY_KISS,
     MOVE_ROCK_SLIDE,
+    MOVE_SLEEP_POWDER,
+    MOVE_DOUBLE_EDGE,
+    MOVE_ICE_BEAM,
+    MOVE_SUBSTITUTE,
     MOVE_COUNT
 };
 
@@ -53,7 +57,11 @@ inline constexpr std::array<Move, MOVE_COUNT> MOVE_DEFS = {{
     {WATER, 95, 100, 15, EFFECT_DAMAGE, 0, 0, 0},
     {NORMAL, 0, 100, 10, EFFECT_HEAL, 50, 0, 0},
     {NORMAL, 0, 75, 10, EFFECT_STATUS, STATUS_SLEEP, 0, 0},
-    {ROCK, 75, 90, 10, EFFECT_DAMAGE, 0, 0, 0}
+    {ROCK, 75, 90, 10, EFFECT_DAMAGE, 0, 0, 0},
+    {GRASS, 0, 75, 15, EFFECT_STATUS, STATUS_SLEEP, 0, 0},
+    {NORMAL, 120, 100, 15, EFFECT_RECOIL, 50, 0, 0},
+    {ICE, 90, 100, 10, EFFECT_DAMAGE, 0, 0, 0},
+    {NORMAL, 0, 100, 10, EFFECT_SUBSTITUTE, 0, 0, 0}
 }};
 
 inline constexpr const Move& move_def(MoveId id) noexcept {

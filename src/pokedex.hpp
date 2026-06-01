@@ -105,6 +105,7 @@ enum VolatileFlags : uint32_t {
     VF_FOCUS_ENERGY  = 1 << 9,
 
     VF_THRASHING     = 1 << 10,
+    VF_RECHARGE      = 1 << 11,
 };
 
 enum Stat : uint8_t {
@@ -209,6 +210,8 @@ struct Battler {
 struct Side {
     Battler battlers[6];
     uint8_t active; // index of active battler in party
+    bool reflect;
+    bool light_screen;
 };
 
 struct Battle {
@@ -227,13 +230,17 @@ bool accuracy_check(Battle& state, const Battler& attacker, const Move& move, co
 
 bool maybe_apply_secondary_status(Battle& state, Battler& target, const Move& move, const Species& target_species);
 
-int calculate_damage(Battle& state, const Battler& attacker, const Species& atk_species, const Move& move, const Battler& defender, const Species& def_species);
+int calculate_damage(Battle& state, const Battler& attacker, const Species& atk_species, const Move& move, const Battler& defender, const Species& def_species, int defender_side = -1);
 
 void apply_status(Battle& state, Battler& target, uint8_t status);
 
 void modify_stage(Battler& target, Stat stat, int8_t delta);
 
 bool switch_pokemon(Battle& state, int side_idx, uint8_t new_active);
+
+bool has_usable_pokemon(const Side& side) noexcept;
+bool is_battle_over(const Battle& state) noexcept;
+int winning_side(const Battle& state) noexcept;
 
 void use_move(Battle& state, int side_idx, int battler_idx, uint8_t move_slot);
 

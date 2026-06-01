@@ -13,6 +13,7 @@ enum SpeciesId : uint8_t {
     SPECIES_STARMIE,
     SPECIES_JYNX,
     SPECIES_RHYDON,
+    SPECIES_ALAKAZAM,
     SPECIES_COUNT
 };
 
@@ -25,7 +26,8 @@ inline constexpr std::array<Species, SPECIES_COUNT> SPECIES_DEFS = {{
     {100, 100, 70, 110, 75, NORMAL, NORMAL},
     {60, 75, 85, 115, 100, WATER, PSYCHIC},
     {65, 50, 35, 95, 95, ICE, PSYCHIC},
-    {105, 130, 120, 40, 45, GROUND, ROCK}
+    {105, 130, 120, 40, 45, GROUND, ROCK},
+    {55, 50, 45, 120, 135, PSYCHIC, PSYCHIC}
 }};
 
 inline constexpr const Species& species_def(SpeciesId id) noexcept {

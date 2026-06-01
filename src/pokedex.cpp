@@ -74,7 +74,11 @@ int modified_defense(const Battler& b, const Species&) {
 }
 
 int modified_speed(const Battler& b, const Species&) {
-    return apply_stage(b.speed, b.speed_stage);
+    int speed = apply_stage(b.speed, b.speed_stage);
+    if (b.status == STATUS_PARALYSIS) {
+        speed = (speed * 25 + 50) / 100;
+    }
+    return speed;
 }
 
 int modified_special(const Battler& b, const Species&) {
@@ -91,6 +95,35 @@ inline uint32_t gen1_crit_threshold(uint32_t speed) noexcept {
 
 inline uint32_t gen1_random_factor(Battle& state) noexcept {
     return 217u + (rng_u8(state) % 39u);
+}
+
+inline const Species& species_of(const Battler& battler) noexcept {
+    return species_def(static_cast<SpeciesId>(battler.species_id));
+}
+
+inline const Move& move_of(const Battler& battler, uint8_t slot) noexcept {
+    return move_def(static_cast<MoveId>(battler.moves[slot]));
+}
+
+inline bool is_fainted(const Battler& battler) noexcept {
+    return battler.hp == 0;
+}
+
+inline bool has_usable_pokemon(const Side& side) noexcept {
+    for (int idx = 0; idx < 6; ++idx) {
+        if (side.battlers[idx].hp > 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline const Battler& active_battler(const Battle& state, int side_idx) noexcept {
+    return state.sides[side_idx].battlers[state.sides[side_idx].active];
+}
+
+inline Battler& active_battler(Battle& state, int side_idx) noexcept {
+    return state.sides[side_idx].battlers[state.sides[side_idx].active];
 }
 
 bool accuracy_check(Battle& state, const Battler& attacker, const Move& move, const Battler& defender, const Species&, const Species&) {
@@ -110,7 +143,7 @@ bool accuracy_check(Battle& state, const Battler& attacker, const Move& move, co
     return rng_chance_256(state, static_cast<uint8_t>(accuracy));
 }
 
-int calculate_damage(Battle& state, const Battler& attacker, const Species& atk_species, const Move& move, const Battler& defender, const Species& def_species) {
+int calculate_damage(Battle& state, const Battler& attacker, const Species& atk_species, const Move& move, const Battler& defender, const Species& def_species, int defender_side) {
     const int level = attacker.level > 0 ? attacker.level : 100;
     if (move.effect == EFFECT_LEVEL_DAMAGE) {
         return level;
@@ -157,6 +190,25 @@ int calculate_damage(Battle& state, const Battler& attacker, const Species& atk_
     }
 
     int damage = (base_damage * type_mult + 50) / 100;
+
+    // Apply Reflect / Light Screen if present on defender's side (Gen 1: ignored by critical hits)
+    bool def_has_reflect = false;
+    bool def_has_light = false;
+    if (defender_side >= 0 && defender_side < 2) {
+        def_has_reflect = state.sides[defender_side].reflect;
+        def_has_light = state.sides[defender_side].light_screen;
+    } else {
+        def_has_reflect = (defender.volatiles & VF_REFLECT) != 0;
+        def_has_light = (defender.volatiles & VF_LIGHT_SCREEN) != 0;
+    }
+    if (!critical) {
+        if (physical && def_has_reflect) {
+            damage = (damage + 1) / 2;
+        }
+        if (!physical && def_has_light) {
+            damage = (damage + 1) / 2;
+        }
+    }
 
     const uint32_t random_factor = gen1_random_factor(state);
     damage = (damage * static_cast<int>(random_factor)) / 255;
@@ -226,21 +278,176 @@ bool switch_pokemon(Battle& state, int side_idx, uint8_t new_active) {
         return false;
     }
     side.active = new_active;
+    // In Gen 1, Reflect/Light Screen are lost when the active Pokémon switches
+    side.reflect = false;
+    side.light_screen = false;
     return true;
 }
 
+bool is_battle_over(const Battle& state) noexcept {
+    return !has_usable_pokemon(state.sides[0]) || !has_usable_pokemon(state.sides[1]);
+}
+
+int winning_side(const Battle& state) noexcept {
+    const bool side0_alive = has_usable_pokemon(state.sides[0]);
+    const bool side1_alive = has_usable_pokemon(state.sides[1]);
+    if (side0_alive == side1_alive) {
+        return -1;
+    }
+    return side0_alive ? 0 : 1;
+}
+
 void use_move(Battle& state, int side_idx, int battler_idx, uint8_t move_slot) {
-    Battler& user = state.sides[side_idx].battlers[battler_idx];
-    if (move_slot >= 4 || user.pp[move_slot] == 0) {
+    if (side_idx < 0 || side_idx > 1) {
         return;
     }
+    Battler& user = state.sides[side_idx].battlers[battler_idx];
+    if (user.hp == 0 || move_slot >= 4 || user.pp[move_slot] == 0) {
+        return;
+    }
+
+    if (user.volatiles & VF_RECHARGE) {
+        user.volatiles &= ~VF_RECHARGE;
+        return;
+    }
+
+    const Move& move = move_of(user, move_slot);
+    Battler& target = state.sides[1 - side_idx].battlers[state.sides[1 - side_idx].active];
+    const Species& user_species = species_of(user);
+    const Species& target_species = species_of(target);
+
     --user.pp[move_slot];
     rng_next(state);
+
+    if (!accuracy_check(state, user, move, target, user_species, target_species)) {
+        return;
+    }
+
+    const auto apply_damage = [&](int damage) {
+        if (damage <= 0) {
+            return;
+        }
+        target.hp = static_cast<uint16_t>(damage >= target.hp ? 0 : target.hp - damage);
+    };
+
+    const auto heal_user = [&](uint16_t amount) {
+        user.hp = static_cast<uint16_t>(std::min<int>(user.max_hp, user.hp + amount));
+    };
+
+    switch (move.effect) {
+        case EFFECT_DAMAGE:
+        case EFFECT_LEVEL_DAMAGE:
+        case EFFECT_HYPER_BEAM:
+        case EFFECT_EXPLODE:
+        case EFFECT_DRAIN:
+        case EFFECT_RECOIL: {
+            const int damage = calculate_damage(state, user, user_species, move, target, target_species, 1 - side_idx);
+            apply_damage(damage);
+            if (move.effect == EFFECT_DRAIN) {
+                const uint16_t heal = static_cast<uint16_t>((static_cast<int>(damage) * move.arg1) / 100);
+                heal_user(heal);
+            }
+            if (move.effect == EFFECT_RECOIL) {
+                const uint16_t recoil = static_cast<uint16_t>((static_cast<int>(damage) * move.arg1 + 99) / 100);
+                const uint16_t recoil_damage = std::min<uint16_t>(recoil, user.hp - 1);
+                user.hp = static_cast<uint16_t>(user.hp - recoil_damage);
+            }
+            if (move.effect == EFFECT_EXPLODE) {
+                user.hp = 0;
+            }
+            if (move.effect == EFFECT_HYPER_BEAM) {
+                user.volatiles |= VF_RECHARGE;
+            }
+            if ((move.effect == EFFECT_DAMAGE || move.effect == EFFECT_RECOIL) && target.hp > 0) {
+                maybe_apply_secondary_status(state, target, move, target_species);
+            }
+            break;
+        }
+        case EFFECT_STATUS: {
+            apply_status(state, target, move.arg1);
+            break;
+        }
+        case EFFECT_HEAL: {
+            const uint16_t heal = static_cast<uint16_t>((static_cast<int>(user.max_hp) * move.arg1 + 99) / 100);
+            heal_user(heal);
+            break;
+        }
+        case EFFECT_REST: {
+            user.hp = user.max_hp;
+            user.status = STATUS_SLEEP;
+            user.sleep_turns = rng_range(state, 2u, 3u);
+            break;
+        }
+        case EFFECT_STAT_UP: {
+            modify_stage(user, static_cast<Stat>(move.arg1), static_cast<int8_t>(move.arg2));
+            break;
+        }
+        case EFFECT_STAT_DOWN: {
+            modify_stage(target, static_cast<Stat>(move.arg1), static_cast<int8_t>(-move.arg2));
+            break;
+        }
+        case EFFECT_REFLECT: {
+            // Gen 1: Screens are on/off and are lost on switch; mark side flag true
+            state.sides[side_idx].reflect = true;
+            break;
+        }
+        case EFFECT_LIGHT_SCREEN: {
+            // Gen 1: Screens are on/off and are lost on switch; mark side flag true
+            state.sides[side_idx].light_screen = true;
+            break;
+        }
+        case EFFECT_SUBSTITUTE: {
+            if (!(user.volatiles & VF_SUBSTITUTE)) {
+                const uint16_t substitute_hp = std::max<uint16_t>(1, user.max_hp / 4);
+                if (user.hp > substitute_hp) {
+                    user.hp = static_cast<uint16_t>(user.hp - substitute_hp);
+                    user.substitute_hp = static_cast<uint8_t>(std::min<uint16_t>(substitute_hp, 255u));
+                    user.volatiles |= VF_SUBSTITUTE;
+                }
+            }
+            break;
+        }
+        default: {
+            break;
+        }
+    }
 }
 
 void end_turn(Battle& state) {
     ++state.turn;
     rng_next(state);
+
+    for (int side = 0; side < 2; ++side) {
+        for (int idx = 0; idx < 6; ++idx) {
+            Battler& battler = state.sides[side].battlers[idx];
+            if (battler.hp == 0) {
+                battler.volatiles &= ~VF_FLINCH;
+                continue;
+            }
+
+            if (battler.status == STATUS_SLEEP) {
+                if (battler.sleep_turns > 0) {
+                    --battler.sleep_turns;
+                }
+                if (battler.sleep_turns == 0) {
+                    battler.status = STATUS_NONE;
+                }
+            }
+
+            if (battler.status == STATUS_BURN) {
+                const uint16_t burn_damage = std::max<uint16_t>(1, battler.max_hp / 16);
+                battler.hp = static_cast<uint16_t>(burn_damage >= battler.hp ? 0 : battler.hp - burn_damage);
+            }
+
+            if (battler.status == STATUS_POISON) {
+                const uint16_t poison_damage = std::max<uint16_t>(1, battler.max_hp / 8);
+                battler.hp = static_cast<uint16_t>(poison_damage >= battler.hp ? 0 : battler.hp - poison_damage);
+            }
+
+            battler.volatiles &= ~VF_FLINCH;
+        }
+        // Screens are cleared on switch; no per-turn decrement needed for on/off flags.
+    }
 }
 
 uint64_t hash_battle(const Battle& state) noexcept {
@@ -296,6 +503,9 @@ uint64_t hash_battle(const Battle& state) noexcept {
             hash = mix_u64(hash, static_cast<uint64_t>(battler.speed));
             hash = mix_u64(hash, static_cast<uint64_t>(battler.special));
         }
+        // include side-level reflect/light screen flags
+        hash = mix_u64(hash, static_cast<uint64_t>(state.sides[side].reflect));
+        hash = mix_u64(hash, static_cast<uint64_t>(state.sides[side].light_screen));
     }
     hash = mix_u64(hash, state.rng);
     hash = mix_u64(hash, state.turn);
